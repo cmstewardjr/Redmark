@@ -116,7 +116,7 @@
                     <div id="quit-confirm-screen" class="overlay"><h2>Are you sure?</h2><button id="quit-yes-button" class="btn-blood">Yes</button><button id="quit-no-button" class="btn-go">No</button></div>
                     <div id="new-highscore-screen" class="overlay"><h2>New High Score!</h2><p id="new-highscore-text">0</p><button id="play-again-hs-button" class="btn-blood">Play Again</button></div>
                     <div id="level-complete" class="overlay"><h2>Level Complete!</h2><button id="next-level-button" class="btn-go">Next Level</button></div>
-                    <div id="win-screen" class="overlay"><h2>YOU WIN!</h2><p>You survived the hunt.</p><button id="play-again-win-button" class="btn-blood">Play Again</button></div>
+                    <div id="win-screen" class="overlay"><h2>YOU WIN!</h2><p>You survived the hunt.</p><button id="play-again-win-button" class="btn-blood">Play Again</button>
                 </div>
             </div>
             <div id="controls-dashboard">
@@ -200,7 +200,16 @@
                 return Promise.all(p);
             }
             
-            let player, vampires, bullets, arrows, currentLevel, maze, gameState = 'intro';
+            const PLAYER_SPRITE_SIZE = TILE_SIZE * 2.0; 
+            const VAMPIRE_SPRITE_SIZE = TILE_SIZE * 2.1;
+
+            const HAZARD_CONFIG = {
+                2: { type: 2, radius: TILE_SIZE * 0.9 },
+                3: { type: 3, radius: TILE_SIZE * 0.9 },
+                4: { type: 4, radius: TILE_SIZE * 0.9 }
+            };
+            
+            let player, vampires, bullets, arrows, hazards, currentLevel, maze, gameState = 'intro';
             let score = 0, highScore = 0;
             let countdown = 3, countdownTimer = 1;
             let seenEnemies = new Set();
@@ -208,9 +217,6 @@
             
             const keys={ArrowUp:false,ArrowLeft:false,ArrowDown:false,ArrowRight:false,' ':false};
             let lastTime=0;
-
-            const PLAYER_SPRITE_SIZE = TILE_SIZE * 1.5; 
-            const VAMPIRE_SPRITE_SIZE = TILE_SIZE * 1.2;
 
             const createVampire=(x,y,type)=>{ 
                 let h,c,spd, spriteKey; 
@@ -222,6 +228,8 @@
                 return{
                     x, y, type, radius:TILE_SIZE/3, speed:spd, health:h, maxHealth:h, color:c, path:[], repathTimer: 1, direction: 'front', hurtTimer: 0, spriteKey: spriteKey,
                     currentImage: loadedImages[`${spriteKey}_run_front`], aiState: 'wandering', wanderTarget: null, detectionRadius: TILE_SIZE * 5, shootCooldown: 2 + Math.random() * 2,
+                    bobTimer: Math.random() * Math.PI * 2,
+                    bobAmount: 4 + Math.random() * 4
                 };
             };
             const createPlayer=()=>({
@@ -231,38 +239,48 @@
             const createBullet=(x,y,dir)=>({x,y,radius:10,angle:Math.atan2(dir.y,dir.x),velX:dir.x*600,velY:dir.y*600});
             const createArrow=(x,y,dir)=>({x,y,radius:8,angle:Math.atan2(dir.y,dir.x),velX:dir.x*450,velY:dir.y*450});
             
-            const isObstacle=(tx,ty)=>!maze||tx<0||tx>=COLS||ty<0||ty>=ROWS||maze[ty][tx] >= 1;
-            const getEmptyTile=(forSpawning = false)=>{
-                let x,y, tile;
+            const isWall=(tx,ty)=>!maze||tx<0||tx>=COLS||ty<0||ty>=ROWS||maze[ty][tx] === 1;
+            const getEmptyTile=()=>{
+                let x,y;
                 do{
                     x=Math.floor(Math.random()*COLS);
                     y=Math.floor(Math.random()*ROWS);
-                    tile = maze[y][x];
-                } while( (forSpawning && tile !== 0) || (!forSpawning && isObstacle(x,y)) );
+                } while(isWall(x,y));
                 return{x:x*TILE_SIZE+TILE_SIZE/2,y:y*TILE_SIZE+TILE_SIZE/2};
             };
+            
+            function isObstacle(x, y, radius) {
+                const tileX = Math.floor(x / TILE_SIZE);
+                const tileY = Math.floor(y / TILE_SIZE);
+                if (isWall(tileX, tileY)) return true;
 
-            function teleportPlayerToSafeLocation() { const { x, y } = getEmptyTile(true); player.x = x; player.y = y; }
-
-            function moveEntity(entity, dx, dy, dt) {
-                const r = entity.radius; const attemptedX = entity.x + dx * dt; const attemptedY = entity.y + dy * dt;
-                const checkCollisionTiles = (checkX, checkY, radius) => {
-                    const minGridX = Math.floor((checkX - radius) / TILE_SIZE), maxGridX = Math.floor((checkX + radius) / TILE_SIZE);
-                    const minGridY = Math.floor((checkY - radius) / TILE_SIZE), maxGridY = Math.floor((checkY + radius) / TILE_SIZE);
-                    for (let ty = Math.max(0,minGridY); ty <= Math.min(ROWS - 1, maxGridY); ty++) {
-                        for (let tx = Math.max(0,minGridX); tx <= Math.min(COLS - 1, maxGridX); tx++) {
-                            if (isObstacle(tx, ty)) {
-                                const wallLeft = tx * TILE_SIZE, wallTop = ty * TILE_SIZE;
-                                let testX = Math.max(wallLeft, Math.min(checkX, wallLeft + TILE_SIZE));
-                                let testY = Math.max(wallTop, Math.min(checkY, wallTop + TILE_SIZE));
-                                if ((checkX - testX)**2 + (checkY - testY)**2 < radius**2) return true;
-                            }
+                if (hazards) {
+                    for (const hazard of hazards) {
+                        const dist = Math.sqrt((x - hazard.x)**2 + (y - hazard.y)**2);
+                        if (dist < radius + hazard.radius) {
+                            return true;
                         }
                     }
-                    return false;
-                };
-                if (!checkCollisionTiles(attemptedX, entity.y, r)) entity.x = attemptedX;
-                if (!checkCollisionTiles(entity.x, attemptedY, r)) entity.y = attemptedY;
+                }
+                return false;
+            }
+
+            function teleportPlayerToSafeLocation() { 
+                let safePos;
+                do {
+                    safePos = getEmptyTile();
+                } while (isObstacle(safePos.x, safePos.y, player.radius));
+                player.x = safePos.x;
+                player.y = safePos.y;
+            }
+
+            function moveEntity(entity, dx, dy, dt) {
+                const r = entity.radius;
+                const attemptedX = entity.x + dx * dt;
+                const attemptedY = entity.y + dy * dt;
+
+                if (!isObstacle(attemptedX, entity.y, r)) entity.x = attemptedX;
+                if (!isObstacle(entity.x, attemptedY, r)) entity.y = attemptedY;
             }
 
             function update(dt) { if (gameState === 'playing') updateGame(dt); else if (gameState === 'countdown') updateCountdown(dt); }
@@ -299,12 +317,18 @@
                 if (keys[' '] && player.shootCooldown <= 0) { shoot(); player.shootCooldown = 0.3; }
 
                 if (player.invincibilityTimer <= 0) {
-                    const pTX = Math.floor(player.x/TILE_SIZE), pTY = Math.floor(player.y/TILE_SIZE);
-                    if (maze[pTY][pTX] > 1) handlePlayerDamage();
+                    for (const hazard of hazards) {
+                        const dist = Math.sqrt((player.x - hazard.x)**2 + (player.y - hazard.y)**2);
+                        if (dist < player.radius + hazard.radius) {
+                            handlePlayerDamage();
+                            break;
+                        }
+                    }
                 }
                 
                 vampires.forEach((v, i) => {
                     v.hurtTimer = Math.max(0, v.hurtTimer - dt);
+		            v.bobTimer += dt * 4;
                     const distToPlayer=Math.sqrt((player.x-v.x)**2+(player.y-v.y)**2);
 
                     if (distToPlayer < v.detectionRadius) {
@@ -354,10 +378,9 @@
                     }
                 });
 
-                // Update Arrows
                 for (let i = arrows.length-1; i >= 0; i--) {
                     const a = arrows[i]; a.x += a.velX * dt; a.y += a.velY * dt;
-                    if(isObstacle(Math.floor(a.x/TILE_SIZE),Math.floor(a.y/TILE_SIZE))){arrows.splice(i, 1); continue;}
+                    if(isObstacle(a.x, a.y, a.radius)){arrows.splice(i, 1); continue;}
                     if(player.invincibilityTimer <= 0 && Math.sqrt((a.x-player.x)**2+(a.y-player.y)**2)<a.radius+player.radius){
                         handlePlayerDamage();
                         arrows.splice(i,1);
@@ -368,7 +391,7 @@
                 
                 for (let i = bullets.length-1; i >= 0; i--) {
                     const b = bullets[i]; b.x += b.velX * dt; b.y += b.velY * dt;
-                    if(isObstacle(Math.floor(b.x/TILE_SIZE),Math.floor(b.y/TILE_SIZE))){bullets.splice(i, 1); continue;}
+                    if(isObstacle(b.x, b.y, b.radius)){bullets.splice(i, 1); continue;}
                     for(let j=vampires.length-1;j>=0;j--){
                         const v=vampires[j];
                         if(Math.sqrt((b.x-v.x)**2+(b.y-v.y)**2)<b.radius+v.radius){
@@ -387,10 +410,17 @@
                 }
             }
             function vampireShoot(v) {
-                const dir = { x: player.x - v.x, y: player.y - v.y };
-                const mag = Math.sqrt(dir.x**2 + dir.y**2);
-                if (mag > 0) { dir.x /= mag; dir.y /= mag; }
-                arrows.push(createArrow(v.x, v.y, dir));
+                const dx = player.x - v.x;
+                const dy = player.y - v.y;
+                let dir = {x: 0, y: 0};
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    dir.x = Math.sign(dx);
+                } else {
+                    dir.y = Math.sign(dy);
+                }
+                if (dir.x !== 0 || dir.y !== 0) {
+                    arrows.push(createArrow(v.x, v.y, dir));
+                }
             }
             function handlePlayerDamage() {
                 player.health--; player.invincibilityTimer = 1.5; updateUI(true); teleportPlayerToSafeLocation();
@@ -411,7 +441,7 @@
                     const neighbors = [{dx:0,dy:-1},{dx:0,dy:1},{dx:-1,dy:0},{dx:1,dy:0}];
                     for (const { dx, dy } of neighbors) {
                         const nX = current.x + dx, nY = current.y + dy;
-                        if (isObstacle(nX, nY) || closedSet.has(`${nX},${nY}`)) continue;
+                        if (isWall(nX, nY) || closedSet.has(`${nX},${nY}`)) continue;
                         const gScore = current.g + 1;
                         let neighborNode = openSet.find(node => node.x === nX && node.y === nY);
                         if (!neighborNode) {
@@ -426,15 +456,34 @@
                 ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle='#4a2a2a'; ctx.fillRect(0,0,canvas.width,canvas.height);
                 if (maze) {
                     for(let y=0;y<ROWS;y++){ for(let x=0;x<COLS;x++){
-                        let img=null;
-                        switch(maze[y][x]){case 1:img=loadedImages.wall;break;case 2:img=loadedImages.hazard2;break;case 3:img=loadedImages.hazard3;break;case 4:img=loadedImages.hazard4;break;}
-                        if (img) ctx.drawImage(img,x*TILE_SIZE,y*TILE_SIZE,TILE_SIZE,TILE_SIZE);
+                        if(maze[y][x] === 1) {
+                            ctx.drawImage(loadedImages.wall, x*TILE_SIZE, y*TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                        }
                     }}
                 }
-                // Draw Arrows
+                if (hazards) {
+                    hazards.forEach(h => {
+                        if (h.image) {
+                            const drawSize = h.radius * 2;
+                            ctx.drawImage(h.image, h.x - h.radius, h.y - h.radius, drawSize, drawSize);
+                        }
+                    });
+                }
                 if(arrows){ctx.fillStyle='red';ctx.strokeStyle='#8B0000';ctx.lineWidth=2;arrows.forEach(a=>{ctx.save();ctx.translate(a.x,a.y);ctx.rotate(a.angle);ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(-a.radius, -a.radius/2);ctx.lineTo(-a.radius, a.radius/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();});}
                 if(bullets){ctx.fillStyle='#2A52BE';ctx.strokeStyle='#ADD8E6';ctx.lineWidth=2;bullets.forEach(b=>{ctx.save();ctx.translate(b.x,b.y);ctx.rotate(b.angle);ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(-b.radius, -b.radius/2);ctx.lineTo(-b.radius, b.radius/2);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();});}
-                if(vampires){vampires.forEach(v=>{if(v.currentImage){ctx.save();ctx.translate(v.x,v.y);if(v.spriteKey==='vampire3'&&v.direction==='right')ctx.scale(-1,1);ctx.drawImage(v.currentImage,-VAMPIRE_SPRITE_SIZE/2,-VAMPIRE_SPRITE_SIZE/2,VAMPIRE_SPRITE_SIZE,VAMPIRE_SPRITE_SIZE);ctx.restore();}});}
+                 if(vampires){
+                    vampires.forEach(v=>{
+                        if(v.currentImage){
+                            const bobOffset = Math.sin(v.bobTimer) * v.bobAmount; 
+                            ctx.save();
+                            ctx.translate(v.x, v.y + bobOffset); 
+                            if(v.spriteKey==='vampire3' && v.direction==='right') ctx.scale(-1,1);
+                            ctx.drawImage(v.currentImage, -VAMPIRE_SPRITE_SIZE/2, -VAMPIRE_SPRITE_SIZE/2, VAMPIRE_SPRITE_SIZE, VAMPIRE_SPRITE_SIZE);
+                            ctx.restore();
+                        }
+                    });
+                }
+
                 if(player){
                     if(player.currentImage){ctx.save();ctx.translate(player.x,player.y);ctx.drawImage(player.currentImage,-PLAYER_SPRITE_SIZE/2,-PLAYER_SPRITE_SIZE/2,PLAYER_SPRITE_SIZE,PLAYER_SPRITE_SIZE);ctx.restore();}
                     if(player.invincibilityTimer>0){const pF=Math.abs(Math.sin(Date.now()*0.005));ctx.strokeStyle=`rgba(0,123,167,${0.5+pF*0.5})`;ctx.lineWidth=4;ctx.beginPath();ctx.arc(player.x,player.y,player.radius+3,0,Math.PI*2);ctx.stroke();}
@@ -444,6 +493,28 @@
             function gameLoop(t){ const dt=(t-lastTime)/1000; lastTime=t; if(dt>0&&dt<1)update(dt); draw(); requestAnimationFrame(gameLoop); }
             function resizeGame() { const gA=document.getElementById('game-area'),cW=document.getElementById('canvas-wrapper'),aW=gA.clientWidth,aH=gA.clientHeight,cAR=canvas.width/canvas.height;let nW=aW,nH=nW/cAR;if(nH>aH){nH=aH;nW=nH*cAR;}cW.style.width=`${nW}px`;cW.style.height=`${nH}px`;}
             
+            function createHazardsFromMaze(grid) {
+                const newHazards = [];
+                for (let y = 0; y < ROWS; y++) {
+                    for (let x = 0; x < COLS; x++) {
+                        const tileType = grid[y][x];
+                        if (tileType > 1) {
+                            const config = HAZARD_CONFIG[tileType];
+                            if (config) {
+                                newHazards.push({
+                                    x: x * TILE_SIZE + TILE_SIZE / 2,
+                                    y: y * TILE_SIZE + TILE_SIZE / 2,
+                                    radius: config.radius,
+                                    type: config.type,
+                                    image: loadedImages[`hazard${config.type}`]
+                                });
+                            }
+                        }
+                    }
+                }
+                return newHazards;
+            }
+
             function generateLevelLayout() {
                 let nM=Array.from({length:ROWS},()=>Array(COLS).fill(0));
                 for (let y=0;y<ROWS;y++) { for (let x=0;x<COLS;x++) { if (y===0||y===ROWS-1||x===0||x===COLS-1) nM[y][x]=1;}}
@@ -456,12 +527,40 @@
             }
 
             function setupLevel(level){
-                currentLevel=level; maze=generateLevelLayout(); player=createPlayer(); vampires=[]; bullets=[]; arrows=[]; newEnemyToShow = null;
-                if(level===1){score=0; seenEnemies = new Set(['red']);} countdown=3; countdownTimer=1; gameState='countdown';
-                let enemyTypesToSpawn=[],redCount=4+(level-1),purpleCount=0,orangeCount=0; 
-                if (level >= 2) purpleCount = Math.floor(level / 2); if (level >= 4) orangeCount = Math.floor((level - 2) / 2);
-                for(let i=0;i<redCount;i++)enemyTypesToSpawn.push('red'); for(let i=0;i<purpleCount;i++)enemyTypesToSpawn.push('purple'); for(let i=0;i<orangeCount;i++)enemyTypesToSpawn.push('orange');
-                enemyTypesToSpawn.forEach(type=>{const tile=getEmptyTile(true);vampires.push(createVampire(tile.x,tile.y,type));});
+                currentLevel=level; 
+                maze=generateLevelLayout(); 
+                hazards = createHazardsFromMaze(maze);
+                player=createPlayer(); 
+                if (isObstacle(player.x, player.y, player.radius)) {
+                    teleportPlayerToSafeLocation();
+                }
+                vampires=[]; bullets=[]; arrows=[]; newEnemyToShow = null;
+                
+                let enemyTypesToSpawn=[];
+                if (level === 1) {
+                    for (let i = 0; i < 6; i++) {
+                        enemyTypesToSpawn.push('red');
+                    }
+                    score = 0;
+                    seenEnemies = new Set(['red']);
+                } else {
+                    let redCount=4+(level-1), purpleCount=0, orangeCount=0; 
+                    if (level >= 2) purpleCount = Math.floor(level / 2); 
+                    if (level >= 4) orangeCount = Math.floor((level - 2) / 2);
+                    for(let i=0;i<redCount;i++)enemyTypesToSpawn.push('red');
+                    for(let i=0;i<purpleCount;i++)enemyTypesToSpawn.push('purple');
+                    for(let i=0;i<orangeCount;i++)enemyTypesToSpawn.push('orange');
+                }
+                
+                countdown=3; countdownTimer=1; gameState='countdown';
+
+                enemyTypesToSpawn.forEach(type=>{
+                    let spawnPos;
+                    do {
+                        spawnPos = getEmptyTile();
+                    } while (isObstacle(spawnPos.x, spawnPos.y, TILE_SIZE/3));
+                    vampires.push(createVampire(spawnPos.x,spawnPos.y,type));
+                });
                 enemyTypesToSpawn.forEach(type=>{if(!seenEnemies.has(type)){newEnemyToShow=type;seenEnemies.add(type);}});
                 Object.values(overlays).forEach(o=>o.classList.remove('visible')); document.getElementById('status-bar').style.visibility='visible'; updateUI();
             }
